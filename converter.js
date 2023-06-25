@@ -1,6 +1,7 @@
 
 async function unzipFile(dir) {
   let unzipedText = ''
+  let mainContent = false;
   // read zipfile data
   try {
     const response = await fetch(dir);
@@ -21,10 +22,7 @@ async function unzipFile(dir) {
         const fileData = await zipEntry.async('uint8array');
         const fileName = zipEntry.name;
         const fileExtension = fileName.substring(fileName.lastIndexOf('.') + 1);
-
         // console.log('File:', fileName);
-
-
         if (fileExtension === 'html') {
           const blob = new Blob([fileData]);
           let htmlString = await blob.text();
@@ -35,9 +33,9 @@ async function unzipFile(dir) {
           const htmlSpaceRegExp = /&nbsp;/g;
           htmlString = htmlString.replace(htmlSpaceRegExp, ' ')
           //Use regular expression to extract the title content
-          const titleRegex = /<title\b[^>]*>([\s\S]*?)<\/title>/;
-          const matchTitle = titleRegex.exec(htmlString);
-          const titleContent = matchTitle ? matchTitle[1] : '';
+          // const titleRegex = /<title\b[^>]*>([\s\S]*?)<\/title>/;
+          // const matchTitle = titleRegex.exec(htmlString);
+          // const titleContent = matchTitle ? matchTitle[1] : '';
           //console.log(titleContent)
 
           // Use regular expression to extract the body content
@@ -97,13 +95,19 @@ async function unzipFile(dir) {
     console.error('Error unzipping file:', error);
   }
 
+  let startText = `<h1 class="h10"><a id="a6"></a><a id="a7"></a><a id="a8"></a>Mahāparittaṁ<br/>The Great Safeguard</h1>`
+  let endText = `<h3 class="h30">* * * Further Reading * * *</h3>`;
+  unzipedText = unzipedText.split(startText)
+  //console.log(unzipedText)
+
+  unzipedText = startText + "\n" + unzipedText[1]
+  unzipedText = unzipedText.split(endText);
   // finally return html content
-  return unzipedText
+  return unzipedText[0] + "\n" + endText
 }
 
 
 async function makeSqlData() {
-
 
   let title = '';
   let basketName = '';
@@ -126,7 +130,7 @@ async function makeSqlData() {
 
     //Retrieve text from epub ebook via unziped
     let unzipedText = await unzipFile(dir);
-    // console.log(unzipedText)
+    //console.log(unzipedText)
 
     title = bookList[i].title;
     basketName = bookList[i].basketName;
@@ -134,9 +138,8 @@ async function makeSqlData() {
     categoryName = bookList[i].categoryName;
     bookName = bookList[i].bookName;
     bookID = bookList[i].bookID;
-
     let totalPageNum = 0;
-    let getPageSql;
+
     // delete the info
     deletesSql += "Begin Transaction;\n";
     deletesSql += `DELETE from tocs where book_id = '${bookID}';\n`;
@@ -152,36 +155,30 @@ async function makeSqlData() {
     const lines = unzipedText.split('\n');
     let lineLimit = 35;
 
-    getPageSql = pageGenerator(lines, bookID);
-    pagesSql += getPageSql.pagesSql;
-    totalPageNum = getPageSql.totalPageNum
+    const { pages, pageNum } = await pageGenerator(lines, bookID);
+    pagesSql += pages;
+    totalPageNum = pageNum
 
     categorySql += `INSERT INTO category (id, name, basket) Select '${categoryID}', '${categoryName}', '${basketName}' WHERE NOT EXISTS(SELECT 1 FROM category WHERE id = '${categoryID}');\n`;
-
     booksSql += `INSERT INTO books (id, basket, category, name, firstpage, lastpage, pagecount) VALUES ('${bookID}', '${basketName}', '${categoryID}', '${bookName}', 1, ${totalPageNum}, ${totalPageNum});\n`;
-
     pagesSql += "COMMIT;\n";
-
-
   }
 
   const categoryAndBooks = `Begin Transaction;\n${categorySql}${booksSql}\nCOMMIT;\n`;
   const content = `${deletesSql}${categoryAndBooks}${pagesSql}`;
 
-
   var blob = new Blob([content], { type: "application/sql" });
   var url = URL.createObjectURL(blob);
 
-  // Trigger file download
+  //Trigger file download
   var link = document.createElement("a");
   link.setAttribute("href", url);
-  link.setAttribute("download", "converted.sql");
+  link.setAttribute("download", bookName + ".sql");
   link.click();
-  
+
 }
 
-
-function pageGenerator(lines, bookID) {
+async function pageGenerator(lines, bookID) {
   let pageNum = 1;
   let sb = '';
   let pagesSql = '';
@@ -191,8 +188,7 @@ function pageGenerator(lines, bookID) {
   //console.log(lines)
   for (let k = 0; k < lines.length; k++) {
     let line = lines[k].replace(/'/g, "''");
-     line = line.replace(/<br\/>/g, " ");
-
+    line = line.replace(/<br\/>/g, " ");
     linesPerPage++;
 
     if (line.includes('</h')) {
@@ -213,14 +209,9 @@ function pageGenerator(lines, bookID) {
 
       pagesSql += `INSERT INTO tocs (book_id, name, type, page_number) VALUES ('${bookID}', '${titleLine}', 'title', ${pageNum});\n`;
     } else {
-      let p = document.createElement('p')
-      p.innerHTML = line
-      line = p.textContent
+      line = await htmlManipulation(line, 'p')
     }
-    //console.log(line)
-
-    sb += `<p>${line}</p>`;
-    sb = sb.replace('\n', ' ')
+    sb += line;
     if (linesPerPage > 35) {
       pagesSql += `INSERT INTO pages (bookid, page, content, paranum) VALUES ('${bookID}', ${pageNum}, '${sb}', '-${pageNum}-');\n`;
       linesPerPage = 0;
@@ -231,8 +222,6 @@ function pageGenerator(lines, bookID) {
 
   // there are remainder items.. like half page remaining.
   if (sb !== '') {
-
-
     pagesSql += `INSERT INTO pages (bookid, page, content, paranum) VALUES ('${bookID}', ${pageNum}, '${sb}', '-${pageNum}-');\n`;
     linesPerPage = 0;
     pageNum++;
@@ -240,13 +229,44 @@ function pageGenerator(lines, bookID) {
   }
 
   //console.log(pagesSql)
-  // return an Object {pagesSql, totalPageNum}
+  // return an Object {pages, pageNum}
   return {
-    pagesSql: pagesSql,
-    totalPageNum: pageNum
+    pages: pagesSql,
+    pageNum: pageNum
   };
 }
 
+//note : 
+//This method works only on the safeguard_recitals.epub 
+async function htmlManipulation(line, tagName) {
+  // Use regular expression to extract the tag content
+  const tagRegex = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`);
+  const match = await tagRegex.exec(line);
+  let exactContent = match ? match[1] : '';
+
+  //English contents in the span tag 
+  if (!exactContent.startsWith('<span')) {
+    exactContent = `<span class="t1">${exactContent} </span>`
+  }
+  //pali contents in the span tag 
+  exactContent = exactContent.replace(/class="t8"/g, `class="t5"`)
+
+  let div = document.createElement('div')
+  div.innerHTML = exactContent
+  //Text extract from a tag
+  try {
+    div.querySelectorAll('a').forEach((el) => {
+      el.insertAdjacentHTML('afterend', el.textContent)
+      el.remove();
+    })
+  } catch (error) {
+
+  }
+
+  // console.log(div)
+  // console.log(exactContent);
+  return `<p class="p3">${div.innerHTML}</p>`;
+}
 
 
 async function showBookList() {
@@ -257,7 +277,6 @@ async function showBookList() {
   bookList.forEach(element => {
     bookNames.push(`<li>${element.bookName}</li>`)
   });
-
   book_names.innerHTML = bookNames.join(' ')
 
 }
